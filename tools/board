@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Team message board backed by a GitHub issue. Requires: bash, gh.
+set -euo pipefail
+
+ISSUE="${BOARD_ISSUE:-1}"
+REPO="${BOARD_REPO:-}"
+STATE_DIR="$HOME/.local/state/board"
+
+usage() {
+  cat <<USAGE
+Usage:
+  tools/board post "[Name's Agent] message"   post a comment (must start with '[')
+  tools/board unread                          show comments newer than last seen
+  tools/board wait [--interval N]             block until someone else comments (default 30s)
+  tools/board read [-n 20]                    show the last N comments
+  tools/board whoami                          print your GitHub login
+Env: BOARD_ISSUE (default 1), BOARD_REPO (default: auto-detect), BOARD_WAIT=off
+USAGE
+}
+
+die() { echo "board: $*" >&2; exit 1; }
+
+repo() {
+  if [ -z "$REPO" ]; then
+    REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || die "cannot detect repo; set BOARD_REPO"
+  fi
+  printf '%s' "$REPO"
+}
+
+me() { gh api user -q .login; }
+
+last_file() { printf '%s/%s_%s.last' "$STATE_DIR" "$(repo | tr '/' '_')" "$ISSUE"; }
+
+# Emit comments as: id<TAB>login<TAB>created_at<TAB>body (newlines escaped as \n).
+# $1 = jq select filter (default: all)
+fetch() {
+  local filter="${1:-true}"
+  gh api --paginate "repos/$(repo)/issues/$ISSUE/comments?per_page=100" \
+    -q ".[] | select($filter) | \"\(.id)\t\(.user.login)\t\(.created_at)\t\(.body | gsub(\"\r\"; \"\") | gsub(\"\n\"; \"\\\\n\") | gsub(\"\t\"; \" \"))\""
+}
+
+show() {
+  local id login ts body
+  while IFS=$'\t' read -r id login ts body; do
+    [ -n "$id" ] || continue
+    printf '#%s %s @%s\n%s\n\n' "$id" "$ts" "$login" "${body//\\n/$'\n'}"
+  done
+}
+
+cmd_post() {
+  [ $# -ge 1 ] || die "usage: tools/board post \"[Name's Agent] message\""
+  local msg="$*"
+  case "$msg" in
+    \[*) ;;
+    *) die "message must start with '[' (e.g. \"[Name's Agent] ...\")" ;;
+  esac
+  local url
+  url="$(gh api "repos/$(repo)/issues/$ISSUE/comments" -f body="$msg" -q .html_url)"
+  echo "posted: $url"
+}
+
+cmd_unread() {
+  local file last=0 login out maxid
+  file="$(last_file)"
+  [ -f "$file" ] && last="$(cat "$file")"
+  login="$(me)"
+  out="$(fetch ".id > $last")"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | show
+    maxid="$(printf '%s\n' "$out" | cut -f1 | sort -n | tail -n1)"
+    mkdir -p "$STATE_DIR"
+    printf '%s' "$maxid" > "$file"
+    if printf '%s\n' "$out" | cut -f4- | grep -Eiq "@(${login}|all)([^A-Za-z0-9_-]|$)"; then
+      echo "[MENTION] You were mentioned (@$login or @all) in the comments above."
+    fi
+  fi
+  if [ "${BOARD_WAIT:-}" != "off" ]; then
+    echo "(hint: run \`tools/board wait\` in the background to be notified of new messages)"
+  fi
+}
+
+cmd_wait() {
+  local interval=30
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="${2:?--interval needs a value}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  local file base login out
+  file="$(last_file)"
+  login="$(me)"
+  if [ -f "$file" ]; then
+    base="$(cat "$file")"
+  else
+    base="$(fetch true | cut -f1 | sort -n | tail -n1)"
+    base="${base:-0}"
+  fi
+  while :; do
+    out="$(fetch ".id > $base and .user.login != \"$login\"")"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out" | show
+      exit 0
+    fi
+    sleep "$interval"
+  done
+}
+
+cmd_read() {
+  local n=20
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:?-n needs a value}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  fetch true | tail -n "$n" | show
+}
+
+case "${1:-}" in
+  post)   shift; cmd_post "$@" ;;
+  unread) shift; cmd_unread ;;
+  wait)   shift; cmd_wait "$@" ;;
+  read)   shift; cmd_read "$@" ;;
+  whoami) me ;;
+  -h|--help|help|"") usage ;;
+  *) usage >&2; exit 1 ;;
+esac
