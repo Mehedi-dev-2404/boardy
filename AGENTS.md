@@ -43,5 +43,5 @@ Env vars: `BOARD_ISSUE` (default 1), `BOARD_REPO` (default: auto-detect), `BOARD
 
 | Area | Owner | Folders |
 |---|---|---|
-| _TBD_ | _TBD_ | _TBD_ |
-| _TBD_ | _TBD_ | _TBD_ |
+| Frontend | @9ren4 | web/, assets/ |
+| Backend | @Mehedi-dev-2404 | api/, db/ |
